@@ -2,6 +2,7 @@ import base64
 import inspect
 import json
 import logging
+import time
 from abc import ABC
 from contextlib import ExitStack
 from typing import (
@@ -11,6 +12,7 @@ from typing import (
     Iterable,
     Iterator,
     Mapping,
+    Optional,
     OrderedDict,
     TypedDict,
     TypeVar,
@@ -25,6 +27,16 @@ from google.adk.models.llm_request import LlmRequest
 from google.adk.models.llm_response import LlmResponse
 from google.adk.tools.base_tool import BaseTool
 from google.genai import types
+from openinference.semconv.trace import (
+    MessageAttributes,
+    MessageContentAttributes,
+    OpenInferenceLLMProviderValues,
+    OpenInferenceMimeTypeValues,
+    OpenInferenceSpanKindValues,
+    SpanAttributes,
+    ToolAttributes,
+    ToolCallAttributes,
+)
 from opentelemetry import context as context_api
 from opentelemetry import trace as trace_api
 from opentelemetry.context import _SUPPRESS_INSTRUMENTATION_KEY
@@ -37,16 +49,6 @@ from openinference.instrumentation import (
     safe_json_dumps,
     using_session,
     using_user,
-)
-from openinference.semconv.trace import (
-    MessageAttributes,
-    MessageContentAttributes,
-    OpenInferenceLLMProviderValues,
-    OpenInferenceMimeTypeValues,
-    OpenInferenceSpanKindValues,
-    SpanAttributes,
-    ToolAttributes,
-    ToolCallAttributes,
 )
 
 logger = logging.getLogger(__name__)
@@ -67,6 +69,19 @@ class _WithTracer(ABC):
         self._tracer = tracer
 
 
+class _WithMeter(ABC):
+    def __init__(
+        self,
+        meter: Any,
+        instrumentor: Any,
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self._meter = meter
+        self._instrumentor = instrumentor
+
+
 class _RunnerRunAsyncKwargs(TypedDict):
     user_id: str
     session_id: str
@@ -74,7 +89,7 @@ class _RunnerRunAsyncKwargs(TypedDict):
     run_config: NotRequired[RunConfig]
 
 
-class _RunnerRunAsync(_WithTracer):
+class _RunnerRunAsync(_WithTracer, _WithMeter):
     def __call__(
         self,
         wrapped: Callable[..., AsyncGenerator[Event, None]],
@@ -122,7 +137,44 @@ class _RunnerRunAsync(_WithTracer):
                         stack.enter_context(using_user(user_id))
                     if session_id is not None:
                         stack.enter_context(using_session(session_id))
+
+                    # Track timing for tokens
+                    start_time = time.time()
+                    first_token_time: Optional[float] = None
+                    last_token_time: Optional[float] = None
+                    token_count = 0
+
                     async for event in self.__wrapped__:
+                        current_time = time.time()
+
+                        # Track first token timing
+                        if first_token_time is None and event.content:
+                            first_token_time = current_time
+                            # Convert to ms
+                            time_to_first_token = (first_token_time - start_time) * 1000
+                            try:
+                                span.set_attribute(
+                                    "gen_ai.client.time_to_first_token",
+                                    time_to_first_token,
+                                )
+                            except Exception:
+                                logger.exception("Failed to set time_to_first_token attribute")
+
+                        # Track inter-token timing
+                        if event.content and last_token_time is not None:
+                            # Convert to ms
+                            time_between_tokens = (current_time - last_token_time) * 1000
+                            try:
+                                span.set_attribute(
+                                    "gen_ai.client.time_between_token", time_between_tokens
+                                )
+                            except Exception:
+                                logger.exception("Failed to set time_between_token attribute")
+
+                        if event.content:
+                            token_count += 1
+                            last_token_time = current_time
+
                         if event.is_final_response():
                             try:
                                 span.set_attribute(
@@ -133,11 +185,34 @@ class _RunnerRunAsync(_WithTracer):
                                     SpanAttributes.OUTPUT_MIME_TYPE,
                                     OpenInferenceMimeTypeValues.JSON.value,
                                 )
+
+                                # Calculate time per output token
+                                if (
+                                    token_count > 0
+                                    and last_token_time is not None
+                                    and first_token_time is not None
+                                ):
+                                    # Convert to ms
+                                    total_token_time = (last_token_time - first_token_time) * 1000
+                                    time_per_output_token = total_token_time / token_count
+                                    span.set_attribute(
+                                        "gen_ai.client.time_per_output_token",
+                                        time_per_output_token,
+                                    )
                             except Exception:
                                 logger.exception(
                                     f"Failed to get attribute: {SpanAttributes.OUTPUT_VALUE}."
                                 )
                         yield event
+
+                    # Calculate and set operation duration at the end
+                    end_time = time.time()
+                    operation_duration = (end_time - start_time) * 1000  # Convert to ms
+                    try:
+                        span.set_attribute("gen_ai.client.operation.duration", operation_duration)
+                    except Exception:
+                        logger.exception("Failed to set operation.duration attribute")
+
                     span.set_status(StatusCode.OK)
 
         return _AsyncGenerator(generator)
@@ -190,7 +265,7 @@ class _BaseAgentRunAsync(_WithTracer):
         return _AsyncGenerator(generator)
 
 
-class _TraceCallLlm(_WithTracer):
+class _TraceCallLlm(_WithTracer, _WithMeter):
     @wrapt.decorator  # type: ignore[misc]
     def __call__(
         self,
@@ -208,6 +283,13 @@ class _TraceCallLlm(_WithTracer):
             SpanAttributes.OPENINFERENCE_SPAN_KIND,
             OpenInferenceSpanKindValues.LLM.value,
         )
+
+        # Add gen_ai.client.operation attribute
+        try:
+            span.set_attribute("gen_ai.client.operation", "chat")
+        except Exception:
+            logger.exception("Failed to set gen_ai.client.operation attribute")
+
         arguments = bind_args_kwargs(wrapped, *args, **kwargs)
         llm_request = next((arg for arg in arguments.values() if isinstance(arg, LlmRequest)), None)
         llm_response = next(
@@ -282,6 +364,39 @@ class _TraceCallLlm(_WithTracer):
         if llm_response:
             for k, v in _get_attributes_from_llm_response(llm_response):
                 span.set_attribute(k, v)
+
+            # Record metrics for token usage and cached tokens
+            if llm_response.usage_metadata:
+                usage = llm_response.usage_metadata
+                if total := usage.total_token_count:
+                    try:
+                        self._instrumentor._token_usage_histogram.record(
+                            total,
+                            attributes={"gen_ai.client.operation": "chat"},
+                        )
+                    except Exception:
+                        logger.exception("Failed to record token usage metric")
+
+                # Record cached tokens metric
+                cached_tokens = 0
+                if hasattr(usage, "cached_input_token_count") and usage.cached_input_token_count:
+                    cached_tokens = usage.cached_input_token_count
+                elif usage.prompt_tokens_details:
+                    for modality_token_count in usage.prompt_tokens_details:
+                        if (
+                            hasattr(modality_token_count, "cached_token_count")
+                            and modality_token_count.cached_token_count
+                        ):
+                            cached_tokens += modality_token_count.cached_token_count
+
+                if cached_tokens > 0:
+                    try:
+                        self._instrumentor._cached_tokens_histogram.record(
+                            cached_tokens,
+                            attributes={"gen_ai.client.operation": "chat"},
+                        )
+                    except Exception:
+                        logger.exception("Failed to record cached tokens metric")
         return ans
 
 
@@ -385,19 +500,42 @@ def _get_attributes_from_usage_metadata(
 ) -> Iterator[tuple[str, AttributeValue]]:
     if total := obj.total_token_count:
         yield SpanAttributes.LLM_TOKEN_COUNT_TOTAL, total
+        # Add gen_ai.client.token.usage metric
+        try:
+            yield ("gen_ai.client.token.usage", total)
+        except Exception:
+            logger.exception("Failed to set token.usage attribute")
     if obj.prompt_tokens_details:
         prompt_details_audio = 0
+        cached_tokens = 0
         for modality_token_count in obj.prompt_tokens_details:
             if (
                 modality_token_count.modality is types.MediaModality.AUDIO
                 and modality_token_count.token_count
             ):
                 prompt_details_audio += modality_token_count.token_count
+            # Extract cached tokens if available
+            if (
+                hasattr(modality_token_count, "cached_token_count")
+                and modality_token_count.cached_token_count
+            ):
+                cached_tokens += modality_token_count.cached_token_count
         if prompt_details_audio:
             yield (
                 SpanAttributes.LLM_TOKEN_COUNT_PROMPT_DETAILS_AUDIO,
                 prompt_details_audio,
             )
+        if cached_tokens:
+            yield (
+                "gen_ai.usage.prompt_tokens_details.cached_tokens",
+                cached_tokens,
+            )
+    # Also check for cached_input_token_count at the top level
+    if hasattr(obj, "cached_input_token_count") and obj.cached_input_token_count:
+        yield (
+            "gen_ai.usage.prompt_tokens_details.cached_tokens",
+            obj.cached_input_token_count,
+        )
     if prompt := obj.prompt_token_count:
         yield SpanAttributes.LLM_TOKEN_COUNT_PROMPT, prompt
     if obj.candidates_tokens_details:
