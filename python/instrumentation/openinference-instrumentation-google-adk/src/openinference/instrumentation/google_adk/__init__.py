@@ -2,10 +2,12 @@ import logging
 from typing import Any, Collection, Dict, Iterator, List, Tuple, cast
 
 import wrapt
+from opentelemetry import metrics as metrics_api
 from opentelemetry import trace as trace_api
 from opentelemetry.instrumentation.instrumentor import (  # type: ignore[attr-defined]
     BaseInstrumentor,
 )
+from opentelemetry.metrics import Meter
 from opentelemetry.trace import Span, Tracer, get_current_span
 from opentelemetry.util._decorator import _agnosticcontextmanager
 from wrapt import resolve_path, wrap_function_wrapper
@@ -37,6 +39,14 @@ class GoogleADKInstrumentor(BaseInstrumentor):  # type: ignore
                 trace_api.get_tracer(__name__, __version__, tracer_provider),
                 config=config,
             ),
+        )
+
+        # Initialize meter for metrics
+        if not (meter_provider := kwargs.get("meter_provider")):
+            meter_provider = metrics_api.get_meter_provider()
+        self._meter = cast(
+            Meter,
+            meter_provider.get_meter(__name__, __version__),
         )
 
         from google.adk.agents import BaseAgent
@@ -83,7 +93,7 @@ class GoogleADKInstrumentor(BaseInstrumentor):  # type: ignore
         setattr(
             base_llm_flow,
             "trace_call_llm",
-            _TraceCallLlm(self._tracer)(base_llm_flow.trace_call_llm),  # type: ignore[attr-defined]
+            _TraceCallLlm(self._tracer, self._meter)(base_llm_flow.trace_call_llm),  # type: ignore[attr-defined]
         )
 
     def _unpatch_trace_call_llm(self) -> None:

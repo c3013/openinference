@@ -2,6 +2,7 @@ import base64
 import inspect
 import json
 import logging
+import time
 from abc import ABC
 from contextlib import ExitStack
 from typing import (
@@ -28,6 +29,7 @@ from google.genai import types
 from opentelemetry import context as context_api
 from opentelemetry import trace as trace_api
 from opentelemetry.context import _SUPPRESS_INSTRUMENTATION_KEY
+from opentelemetry.metrics import Meter
 from opentelemetry.trace import StatusCode, get_current_span
 from opentelemetry.util.types import AttributeValue
 from typing_extensions import NotRequired, ParamSpec
@@ -191,6 +193,53 @@ class _BaseAgentRunAsync(_WithTracer):
 
 
 class _TraceCallLlm(_WithTracer):
+    def __init__(
+        self,
+        tracer: trace_api.Tracer,
+        meter: Meter,
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(tracer, *args, **kwargs)
+        self._meter = meter
+
+        # Create histogram instruments for metrics
+        self._time_to_first_token_histogram = self._meter.create_histogram(
+            name="gen_ai.client.time_to_first_token",
+            description="Time to first token for LLM operations",
+            unit="s",
+        )
+        self._time_per_output_token_histogram = self._meter.create_histogram(
+            name="gen_ai.client.time_per_output_token",
+            description="Time per output token for LLM operations",
+            unit="s",
+        )
+        self._time_between_token_histogram = self._meter.create_histogram(
+            name="gen_ai.client.time_between_token",
+            description="Time between consecutive tokens for LLM operations",
+            unit="s",
+        )
+        self._operation_duration_histogram = self._meter.create_histogram(
+            name="gen_ai.client.operation.duration",
+            description="Duration of LLM operations",
+            unit="s",
+        )
+        self._token_usage_histogram = self._meter.create_histogram(
+            name="gen_ai.client.token.usage",
+            description="Token usage for LLM operations",
+            unit="{token}",
+        )
+        self._cached_tokens_histogram = self._meter.create_histogram(
+            name="gen_ai.usage.prompt_tokens_details.cached_tokens",
+            description="Number of cached tokens in prompt",
+            unit="{token}",
+        )
+        self._operation_histogram = self._meter.create_histogram(
+            name="gen_ai.client.operation",
+            description="LLM operation type",
+            unit="1",
+        )
+
     @wrapt.decorator  # type: ignore[misc]
     def __call__(
         self,
@@ -199,9 +248,17 @@ class _TraceCallLlm(_WithTracer):
         args: tuple[Any, ...],
         kwargs: Mapping[str, Any],
     ) -> T:
+        # Record start time for operation duration
+        start_time = time.time()
+
         ans = wrapped(*args, **kwargs)
         if context_api.get_value(_SUPPRESS_INSTRUMENTATION_KEY):
             return ans
+
+        # Record end time and calculate operation duration
+        end_time = time.time()
+        operation_duration = end_time - start_time
+
         span = get_current_span()
         span.set_status(StatusCode.OK)  # Pre-emptively set status to OK
         span.set_attribute(
@@ -213,6 +270,15 @@ class _TraceCallLlm(_WithTracer):
         llm_response = next(
             (arg for arg in arguments.values() if isinstance(arg, LlmResponse)), None
         )
+
+        # Prepare attributes for metrics
+        metric_attributes = {}
+        if llm_request and llm_request.model:
+            metric_attributes["gen_ai.request.model"] = llm_request.model
+
+        # Record operation duration metric
+        self._operation_duration_histogram.record(operation_duration, metric_attributes)
+
         input_messages_index = 0
         if llm_request:
             span.set_attribute(
@@ -282,6 +348,65 @@ class _TraceCallLlm(_WithTracer):
         if llm_response:
             for k, v in _get_attributes_from_llm_response(llm_response):
                 span.set_attribute(k, v)
+
+            # Record metrics from llm_response
+            if llm_response.usage_metadata:
+                usage = llm_response.usage_metadata
+
+                # Record total token usage
+                if usage.total_token_count:
+                    self._token_usage_histogram.record(
+                        usage.total_token_count, {**metric_attributes, "gen_ai.token.type": "total"}
+                    )
+
+                # Record prompt token usage
+                if usage.prompt_token_count:
+                    self._token_usage_histogram.record(
+                        usage.prompt_token_count,
+                        {**metric_attributes, "gen_ai.token.type": "input"},
+                    )
+
+                # Record completion token usage
+                completion_tokens = 0
+                if usage.candidates_token_count:
+                    completion_tokens += usage.candidates_token_count
+                if usage.thoughts_token_count:
+                    completion_tokens += usage.thoughts_token_count
+                if completion_tokens > 0:
+                    self._token_usage_histogram.record(
+                        completion_tokens, {**metric_attributes, "gen_ai.token.type": "output"}
+                    )
+
+                # Record cached tokens if available
+                if usage.prompt_tokens_details:
+                    cached_tokens = 0
+                    for modality_token_count in usage.prompt_tokens_details:
+                        # Check if there's a cached_token_count attribute
+                        if (
+                            hasattr(modality_token_count, "cached_token_count")
+                            and modality_token_count.cached_token_count
+                        ):
+                            cached_tokens += modality_token_count.cached_token_count
+                    if cached_tokens > 0:
+                        self._cached_tokens_histogram.record(cached_tokens, metric_attributes)
+
+                # Calculate time per output token
+                if completion_tokens > 0 and operation_duration > 0:
+                    time_per_token = operation_duration / completion_tokens
+                    self._time_per_output_token_histogram.record(time_per_token, metric_attributes)
+
+                    # For time_to_first_token, we estimate it as time_per_token
+                    # In streaming scenarios, this would be tracked differently
+                    # For non-streaming, we approximate as the time per token
+                    self._time_to_first_token_histogram.record(time_per_token, metric_attributes)
+
+                    # For time_between_token, we use the same average
+                    # In streaming, this would be tracked per token
+                    self._time_between_token_histogram.record(time_per_token, metric_attributes)
+
+        # Record operation type (always 1 for chat completion)
+        self._operation_histogram.record(1, {**metric_attributes, "gen_ai.operation.name": "chat"})
+
         return ans
 
 
