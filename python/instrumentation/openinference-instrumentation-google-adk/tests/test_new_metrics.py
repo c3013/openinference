@@ -1,14 +1,9 @@
 """Tests for the new gen_ai metrics added to Google ADK instrumentation."""
 
-import time
-from unittest.mock import AsyncMock, MagicMock, Mock
+from unittest.mock import Mock
 
 import pytest
-from google.adk.events import Event
-from google.adk.models.llm_response import LlmResponse
 from google.genai import types
-from opentelemetry.sdk.trace import ReadableSpan
-from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 
 def test_timing_metrics_attributes():
@@ -52,7 +47,7 @@ def test_usage_metadata_with_cached_tokens():
     usage_metadata.thoughts_token_count = None
     usage_metadata.prompt_tokens_details = []
     usage_metadata.candidates_tokens_details = []
-    
+
     # Mock cached_input_token_count attribute
     usage_metadata.cached_input_token_count = 10
 
@@ -99,7 +94,7 @@ def test_operation_attribute_in_trace_call_llm():
     # This test verifies the attribute key exists in the code
     operation_key = "gen_ai.client.operation"
     expected_value = "chat"
-    
+
     assert isinstance(operation_key, str)
     assert isinstance(expected_value, str)
     # The actual setting is tested through integration tests

@@ -180,9 +180,7 @@ class _RunnerRunAsync(_WithTracer):
                                     and first_token_time is not None
                                 ):
                                     # Convert to ms
-                                    total_token_time = (
-                                        (last_token_time - first_token_time) * 1000
-                                    )
+                                    total_token_time = (last_token_time - first_token_time) * 1000
                                     time_per_output_token = total_token_time / token_count
                                     span.set_attribute(
                                         "gen_ai.client.time_per_output_token",
@@ -473,7 +471,7 @@ def _get_attributes_from_usage_metadata(
                 cached_tokens,
             )
     # Also check for cached_input_token_count at the top level
-    if hasattr(obj, 'cached_input_token_count') and obj.cached_input_token_count:
+    if hasattr(obj, "cached_input_token_count") and obj.cached_input_token_count:
         yield (
             "gen_ai.usage.prompt_tokens_details.cached_tokens",
             obj.cached_input_token_count,
