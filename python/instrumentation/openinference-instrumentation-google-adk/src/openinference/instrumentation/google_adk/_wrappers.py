@@ -102,6 +102,7 @@ class _RunnerRunAsync(_WithTracer, _WithMeter):
             return generator
 
         tracer = self._tracer
+        instrumentor = self._instrumentor
         name = f"invocation [{instance.app_name}]"
         attributes = dict(get_attributes_from_context())
         attributes[SpanAttributes.OPENINFERENCE_SPAN_KIND] = OpenInferenceSpanKindValues.CHAIN.value
@@ -158,7 +159,7 @@ class _RunnerRunAsync(_WithTracer, _WithMeter):
                                     time_to_first_token,
                                 )
                                 # Record metric
-                                self._instrumentor._time_to_first_token_histogram.record(
+                                instrumentor._time_to_first_token_histogram.record(
                                     time_to_first_token,
                                     attributes={"gen_ai.client.operation": "chat"},
                                 )
@@ -174,7 +175,7 @@ class _RunnerRunAsync(_WithTracer, _WithMeter):
                                     "gen_ai.client.time_between_token", time_between_tokens
                                 )
                                 # Record metric
-                                self._instrumentor._time_between_token_histogram.record(
+                                instrumentor._time_between_token_histogram.record(
                                     time_between_tokens,
                                     attributes={"gen_ai.client.operation": "chat"},
                                 )
@@ -210,7 +211,7 @@ class _RunnerRunAsync(_WithTracer, _WithMeter):
                                         time_per_output_token,
                                     )
                                     # Record metric
-                                    self._instrumentor._time_per_output_token_histogram.record(
+                                    instrumentor._time_per_output_token_histogram.record(
                                         time_per_output_token,
                                         attributes={"gen_ai.client.operation": "chat"},
                                     )
@@ -226,7 +227,7 @@ class _RunnerRunAsync(_WithTracer, _WithMeter):
                     try:
                         span.set_attribute("gen_ai.client.operation.duration", operation_duration)
                         # Record metric
-                        self._instrumentor._operation_duration_histogram.record(
+                        instrumentor._operation_duration_histogram.record(
                             operation_duration,
                             attributes={"gen_ai.client.operation": "chat"},
                         )
