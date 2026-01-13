@@ -1,6 +1,6 @@
 """Tests for the new gen_ai metrics added to Google ADK instrumentation."""
 
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pytest
 from google.genai import types
@@ -47,6 +47,38 @@ def test_token_usage_attribute():
     assert isinstance(token_usage_attr, str)
     assert "token" in token_usage_attr
     assert "usage" in token_usage_attr
+
+
+def test_instrumentor_creates_histograms():
+    """Test that the instrumentor creates histogram metrics."""
+    from openinference.instrumentation.google_adk import GoogleADKInstrumentor
+
+    # Mock the meter provider
+    mock_meter = Mock()
+    mock_meter_provider = Mock()
+    mock_meter_provider.get_meter.return_value = mock_meter
+
+    # Mock histogram creation
+    mock_histogram = Mock()
+    mock_meter.create_histogram.return_value = mock_histogram
+
+    instrumentor = GoogleADKInstrumentor()
+
+    with patch("opentelemetry.metrics.get_meter_provider", return_value=mock_meter_provider):
+        instrumentor.instrument(meter_provider=mock_meter_provider)
+
+        # Verify that histograms were created
+        assert mock_meter.create_histogram.call_count >= 6
+        histogram_names = [call[1]["name"] for call in mock_meter.create_histogram.call_args_list]
+
+        assert "gen_ai.client.time_to_first_token" in histogram_names
+        assert "gen_ai.client.time_per_output_token" in histogram_names
+        assert "gen_ai.client.time_between_token" in histogram_names
+        assert "gen_ai.client.operation.duration" in histogram_names
+        assert "gen_ai.client.token.usage" in histogram_names
+        assert "gen_ai.usage.prompt_tokens_details.cached_tokens" in histogram_names
+
+    instrumentor.uninstrument()
 
 
 def test_usage_metadata_with_cached_tokens():

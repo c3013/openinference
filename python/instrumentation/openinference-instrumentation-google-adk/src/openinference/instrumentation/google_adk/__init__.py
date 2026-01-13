@@ -2,10 +2,12 @@ import logging
 from typing import Any, Collection, Dict, Iterator, List, Tuple, cast
 
 import wrapt
+from opentelemetry import metrics as metrics_api
 from opentelemetry import trace as trace_api
 from opentelemetry.instrumentation.instrumentor import (  # type: ignore[attr-defined]
     BaseInstrumentor,
 )
+from opentelemetry.metrics import Meter
 from opentelemetry.trace import Span, Tracer, get_current_span
 from opentelemetry.util._decorator import _agnosticcontextmanager
 from wrapt import resolve_path, wrap_function_wrapper
@@ -39,6 +41,43 @@ class GoogleADKInstrumentor(BaseInstrumentor):  # type: ignore
             ),
         )
 
+        # Set up meter for metrics
+        if not (meter_provider := kwargs.get("meter_provider")):
+            meter_provider = metrics_api.get_meter_provider()
+        self._meter = cast(Meter, meter_provider.get_meter(__name__, __version__))
+
+        # Create histogram metrics
+        self._time_to_first_token_histogram = self._meter.create_histogram(
+            name="gen_ai.client.time_to_first_token",
+            description="Time to first token in milliseconds",
+            unit="ms",
+        )
+        self._time_per_output_token_histogram = self._meter.create_histogram(
+            name="gen_ai.client.time_per_output_token",
+            description="Average time per output token in milliseconds",
+            unit="ms",
+        )
+        self._time_between_token_histogram = self._meter.create_histogram(
+            name="gen_ai.client.time_between_token",
+            description="Time between consecutive tokens in milliseconds",
+            unit="ms",
+        )
+        self._operation_duration_histogram = self._meter.create_histogram(
+            name="gen_ai.client.operation.duration",
+            description="Total operation duration in milliseconds",
+            unit="ms",
+        )
+        self._token_usage_histogram = self._meter.create_histogram(
+            name="gen_ai.client.token.usage",
+            description="Total token usage count",
+            unit="tokens",
+        )
+        self._cached_tokens_histogram = self._meter.create_histogram(
+            name="gen_ai.usage.prompt_tokens_details.cached_tokens",
+            description="Number of cached prompt tokens",
+            unit="tokens",
+        )
+
         from google.adk.agents import BaseAgent
         from google.adk.runners import Runner
 
@@ -50,7 +89,7 @@ class GoogleADKInstrumentor(BaseInstrumentor):  # type: ignore
         # Store original methods for cleanup during uninstrumentation
         self._originals: List[Tuple[Any, Any, Any]] = []
         method_wrappers: Dict[Any, Any] = {
-            Runner.run_async: _RunnerRunAsync(self._tracer),
+            Runner.run_async: _RunnerRunAsync(self._tracer, self._meter, self),
             BaseAgent.run_async: _BaseAgentRunAsync(self._tracer),
         }
 
@@ -83,7 +122,7 @@ class GoogleADKInstrumentor(BaseInstrumentor):  # type: ignore
         setattr(
             base_llm_flow,
             "trace_call_llm",
-            _TraceCallLlm(self._tracer)(base_llm_flow.trace_call_llm),  # type: ignore[attr-defined]
+            _TraceCallLlm(self._tracer, self._meter, self)(base_llm_flow.trace_call_llm),  # type: ignore[attr-defined]
         )
 
     def _unpatch_trace_call_llm(self) -> None:

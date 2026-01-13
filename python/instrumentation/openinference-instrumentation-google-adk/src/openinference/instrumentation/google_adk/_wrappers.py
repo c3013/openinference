@@ -69,6 +69,19 @@ class _WithTracer(ABC):
         self._tracer = tracer
 
 
+class _WithMeter(ABC):
+    def __init__(
+        self,
+        meter: Any,
+        instrumentor: Any,
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self._meter = meter
+        self._instrumentor = instrumentor
+
+
 class _RunnerRunAsyncKwargs(TypedDict):
     user_id: str
     session_id: str
@@ -76,7 +89,7 @@ class _RunnerRunAsyncKwargs(TypedDict):
     run_config: NotRequired[RunConfig]
 
 
-class _RunnerRunAsync(_WithTracer):
+class _RunnerRunAsync(_WithTracer, _WithMeter):
     def __call__(
         self,
         wrapped: Callable[..., AsyncGenerator[Event, None]],
@@ -144,6 +157,11 @@ class _RunnerRunAsync(_WithTracer):
                                     "gen_ai.client.time_to_first_token",
                                     time_to_first_token,
                                 )
+                                # Record metric
+                                self._instrumentor._time_to_first_token_histogram.record(
+                                    time_to_first_token,
+                                    attributes={"gen_ai.client.operation": "chat"},
+                                )
                             except Exception:
                                 logger.exception("Failed to set time_to_first_token attribute")
 
@@ -154,6 +172,11 @@ class _RunnerRunAsync(_WithTracer):
                             try:
                                 span.set_attribute(
                                     "gen_ai.client.time_between_token", time_between_tokens
+                                )
+                                # Record metric
+                                self._instrumentor._time_between_token_histogram.record(
+                                    time_between_tokens,
+                                    attributes={"gen_ai.client.operation": "chat"},
                                 )
                             except Exception:
                                 logger.exception("Failed to set time_between_token attribute")
@@ -186,6 +209,11 @@ class _RunnerRunAsync(_WithTracer):
                                         "gen_ai.client.time_per_output_token",
                                         time_per_output_token,
                                     )
+                                    # Record metric
+                                    self._instrumentor._time_per_output_token_histogram.record(
+                                        time_per_output_token,
+                                        attributes={"gen_ai.client.operation": "chat"},
+                                    )
                             except Exception:
                                 logger.exception(
                                     f"Failed to get attribute: {SpanAttributes.OUTPUT_VALUE}."
@@ -197,6 +225,11 @@ class _RunnerRunAsync(_WithTracer):
                     operation_duration = (end_time - start_time) * 1000  # Convert to ms
                     try:
                         span.set_attribute("gen_ai.client.operation.duration", operation_duration)
+                        # Record metric
+                        self._instrumentor._operation_duration_histogram.record(
+                            operation_duration,
+                            attributes={"gen_ai.client.operation": "chat"},
+                        )
                     except Exception:
                         logger.exception("Failed to set operation.duration attribute")
 
@@ -252,7 +285,7 @@ class _BaseAgentRunAsync(_WithTracer):
         return _AsyncGenerator(generator)
 
 
-class _TraceCallLlm(_WithTracer):
+class _TraceCallLlm(_WithTracer, _WithMeter):
     @wrapt.decorator  # type: ignore[misc]
     def __call__(
         self,
@@ -351,6 +384,39 @@ class _TraceCallLlm(_WithTracer):
         if llm_response:
             for k, v in _get_attributes_from_llm_response(llm_response):
                 span.set_attribute(k, v)
+
+            # Record metrics for token usage and cached tokens
+            if llm_response.usage_metadata:
+                usage = llm_response.usage_metadata
+                if total := usage.total_token_count:
+                    try:
+                        self._instrumentor._token_usage_histogram.record(
+                            total,
+                            attributes={"gen_ai.client.operation": "chat"},
+                        )
+                    except Exception:
+                        logger.exception("Failed to record token usage metric")
+
+                # Record cached tokens metric
+                cached_tokens = 0
+                if hasattr(usage, "cached_input_token_count") and usage.cached_input_token_count:
+                    cached_tokens = usage.cached_input_token_count
+                elif usage.prompt_tokens_details:
+                    for modality_token_count in usage.prompt_tokens_details:
+                        if (
+                            hasattr(modality_token_count, "cached_token_count")
+                            and modality_token_count.cached_token_count
+                        ):
+                            cached_tokens += modality_token_count.cached_token_count
+
+                if cached_tokens > 0:
+                    try:
+                        self._instrumentor._cached_tokens_histogram.record(
+                            cached_tokens,
+                            attributes={"gen_ai.client.operation": "chat"},
+                        )
+                    except Exception:
+                        logger.exception("Failed to record cached tokens metric")
         return ans
 
 
