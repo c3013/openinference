@@ -1,6 +1,6 @@
 # New Gen AI Metrics in Google ADK Instrumentation
 
-This document describes the 5 new gen_ai metrics added to the Google ADK instrumentation plugin.
+This document describes the 7 new gen_ai metrics added to the Google ADK instrumentation plugin.
 
 ## Overview
 
@@ -30,7 +30,19 @@ The following metrics are now automatically tracked and added as span attributes
 **Description:** The type of operation being performed. Currently set to "chat" for LLM interactions.  
 **Use Case:** Categorize different types of LLM operations for filtering and analysis.
 
-### 5. gen_ai.usage.prompt_tokens_details.cached_tokens
+### 5. gen_ai.client.operation.duration
+
+**Type:** Float (milliseconds)  
+**Description:** Total duration of the operation from start to finish.  
+**Use Case:** Track end-to-end operation latency for performance monitoring and optimization.
+
+### 6. gen_ai.client.token.usage
+
+**Type:** Integer  
+**Description:** Total number of tokens used in the operation (prompt + completion).  
+**Use Case:** Monitor token consumption for cost tracking and quota management.
+
+### 7. gen_ai.usage.prompt_tokens_details.cached_tokens
 
 **Type:** Integer  
 **Description:** Number of prompt tokens that were cached and reused from previous requests.  
@@ -112,6 +124,8 @@ After instrumentation, a typical LLM span will include:
   "gen_ai.client.time_per_output_token": 12.3,
   "gen_ai.client.time_between_token": 15.7,
   "gen_ai.client.operation": "chat",
+  "gen_ai.client.operation.duration": 1523.8,
+  "gen_ai.client.token.usage": 350,
   "gen_ai.usage.prompt_tokens_details.cached_tokens": 150,
   // ... other existing attributes
 }

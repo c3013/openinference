@@ -12,6 +12,7 @@ def test_timing_metrics_attributes():
         "gen_ai.client.time_to_first_token",
         "gen_ai.client.time_per_output_token",
         "gen_ai.client.time_between_token",
+        "gen_ai.client.operation.duration",
     ]
     # These are the attribute names that should be set
     for attr in expected_attributes:
@@ -31,6 +32,21 @@ def test_cached_tokens_attribute():
     cached_tokens_attr = "gen_ai.usage.prompt_tokens_details.cached_tokens"
     assert isinstance(cached_tokens_attr, str)
     assert "cached_tokens" in cached_tokens_attr
+
+
+def test_operation_duration_attribute():
+    """Test that gen_ai.client.operation.duration attribute is set."""
+    duration_attr = "gen_ai.client.operation.duration"
+    assert isinstance(duration_attr, str)
+    assert "duration" in duration_attr
+
+
+def test_token_usage_attribute():
+    """Test that gen_ai.client.token.usage attribute is set."""
+    token_usage_attr = "gen_ai.client.token.usage"
+    assert isinstance(token_usage_attr, str)
+    assert "token" in token_usage_attr
+    assert "usage" in token_usage_attr
 
 
 def test_usage_metadata_with_cached_tokens():
@@ -57,6 +73,10 @@ def test_usage_metadata_with_cached_tokens():
     # Verify that cached_tokens attribute is set
     assert "gen_ai.usage.prompt_tokens_details.cached_tokens" in attributes
     assert attributes["gen_ai.usage.prompt_tokens_details.cached_tokens"] == 10
+
+    # Verify that token.usage attribute is set
+    assert "gen_ai.client.token.usage" in attributes
+    assert attributes["gen_ai.client.token.usage"] == 100
 
 
 def test_usage_metadata_with_modality_cached_tokens():
@@ -87,6 +107,10 @@ def test_usage_metadata_with_modality_cached_tokens():
     # Verify that cached_tokens attribute is set
     assert "gen_ai.usage.prompt_tokens_details.cached_tokens" in attributes
     assert attributes["gen_ai.usage.prompt_tokens_details.cached_tokens"] == 5
+
+    # Verify that token.usage attribute is set
+    assert "gen_ai.client.token.usage" in attributes
+    assert attributes["gen_ai.client.token.usage"] == 100
 
 
 def test_operation_attribute_in_trace_call_llm():

@@ -27,6 +27,16 @@ from google.adk.models.llm_request import LlmRequest
 from google.adk.models.llm_response import LlmResponse
 from google.adk.tools.base_tool import BaseTool
 from google.genai import types
+from openinference.semconv.trace import (
+    MessageAttributes,
+    MessageContentAttributes,
+    OpenInferenceLLMProviderValues,
+    OpenInferenceMimeTypeValues,
+    OpenInferenceSpanKindValues,
+    SpanAttributes,
+    ToolAttributes,
+    ToolCallAttributes,
+)
 from opentelemetry import context as context_api
 from opentelemetry import trace as trace_api
 from opentelemetry.context import _SUPPRESS_INSTRUMENTATION_KEY
@@ -39,16 +49,6 @@ from openinference.instrumentation import (
     safe_json_dumps,
     using_session,
     using_user,
-)
-from openinference.semconv.trace import (
-    MessageAttributes,
-    MessageContentAttributes,
-    OpenInferenceLLMProviderValues,
-    OpenInferenceMimeTypeValues,
-    OpenInferenceSpanKindValues,
-    SpanAttributes,
-    ToolAttributes,
-    ToolCallAttributes,
 )
 
 logger = logging.getLogger(__name__)
@@ -191,6 +191,15 @@ class _RunnerRunAsync(_WithTracer):
                                     f"Failed to get attribute: {SpanAttributes.OUTPUT_VALUE}."
                                 )
                         yield event
+
+                    # Calculate and set operation duration at the end
+                    end_time = time.time()
+                    operation_duration = (end_time - start_time) * 1000  # Convert to ms
+                    try:
+                        span.set_attribute("gen_ai.client.operation.duration", operation_duration)
+                    except Exception:
+                        logger.exception("Failed to set operation.duration attribute")
+
                     span.set_status(StatusCode.OK)
 
         return _AsyncGenerator(generator)
@@ -445,6 +454,11 @@ def _get_attributes_from_usage_metadata(
 ) -> Iterator[tuple[str, AttributeValue]]:
     if total := obj.total_token_count:
         yield SpanAttributes.LLM_TOKEN_COUNT_TOTAL, total
+        # Add gen_ai.client.token.usage metric
+        try:
+            yield ("gen_ai.client.token.usage", total)
+        except Exception:
+            logger.exception("Failed to set token.usage attribute")
     if obj.prompt_tokens_details:
         prompt_details_audio = 0
         cached_tokens = 0
