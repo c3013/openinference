@@ -102,7 +102,6 @@ class _RunnerRunAsync(_WithTracer, _WithMeter):
             return generator
 
         tracer = self._tracer
-        instrumentor = self._instrumentor
         name = f"invocation [{instance.app_name}]"
         attributes = dict(get_attributes_from_context())
         attributes[SpanAttributes.OPENINFERENCE_SPAN_KIND] = OpenInferenceSpanKindValues.CHAIN.value
@@ -158,11 +157,6 @@ class _RunnerRunAsync(_WithTracer, _WithMeter):
                                     "gen_ai.client.time_to_first_token",
                                     time_to_first_token,
                                 )
-                                # Record metric
-                                instrumentor._time_to_first_token_histogram.record(
-                                    time_to_first_token,
-                                    attributes={"gen_ai.client.operation": "chat"},
-                                )
                             except Exception:
                                 logger.exception("Failed to set time_to_first_token attribute")
 
@@ -173,11 +167,6 @@ class _RunnerRunAsync(_WithTracer, _WithMeter):
                             try:
                                 span.set_attribute(
                                     "gen_ai.client.time_between_token", time_between_tokens
-                                )
-                                # Record metric
-                                instrumentor._time_between_token_histogram.record(
-                                    time_between_tokens,
-                                    attributes={"gen_ai.client.operation": "chat"},
                                 )
                             except Exception:
                                 logger.exception("Failed to set time_between_token attribute")
@@ -210,11 +199,6 @@ class _RunnerRunAsync(_WithTracer, _WithMeter):
                                         "gen_ai.client.time_per_output_token",
                                         time_per_output_token,
                                     )
-                                    # Record metric
-                                    instrumentor._time_per_output_token_histogram.record(
-                                        time_per_output_token,
-                                        attributes={"gen_ai.client.operation": "chat"},
-                                    )
                             except Exception:
                                 logger.exception(
                                     f"Failed to get attribute: {SpanAttributes.OUTPUT_VALUE}."
@@ -226,11 +210,6 @@ class _RunnerRunAsync(_WithTracer, _WithMeter):
                     operation_duration = (end_time - start_time) * 1000  # Convert to ms
                     try:
                         span.set_attribute("gen_ai.client.operation.duration", operation_duration)
-                        # Record metric
-                        instrumentor._operation_duration_histogram.record(
-                            operation_duration,
-                            attributes={"gen_ai.client.operation": "chat"},
-                        )
                     except Exception:
                         logger.exception("Failed to set operation.duration attribute")
 

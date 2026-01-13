@@ -1,58 +1,69 @@
 # New Gen AI Metrics in Google ADK Instrumentation
 
-This document describes the 7 gen_ai metrics added to the Google ADK instrumentation plugin. These metrics are reported as OpenTelemetry histogram metrics in addition to being set as span attributes.
+This document describes the gen_ai metrics added to the Google ADK instrumentation plugin. Token usage metrics are reported as OpenTelemetry histogram metrics, while timing metrics are captured as span attributes for trace correlation.
 
 ## Overview
 
-The following metrics are now automatically tracked and reported as OpenTelemetry histograms during LLM interactions:
+The following metrics are tracked during LLM interactions:
 
-### 1. gen_ai.client.time_to_first_token
+### Histogram Metrics (LLM Spans Only)
 
-**Type:** Histogram (Float, milliseconds)  
-**Description:** Time elapsed from the start of the request to receiving the first token in the response.  
-**Use Case:** Measure initial latency and response time. Useful for understanding user-perceived latency.  
-**Attributes:** `gen_ai.client.operation` (set to "chat")
+These metrics are recorded as OpenTelemetry histograms when LLM calls are made:
 
-### 2. gen_ai.client.time_per_output_token
-
-**Type:** Histogram (Float, milliseconds)  
-**Description:** Average time taken per output token, calculated as total generation time divided by token count.  
-**Use Case:** Measure generation throughput. Helps understand overall generation speed.  
-**Attributes:** `gen_ai.client.operation` (set to "chat")
-
-### 3. gen_ai.client.time_between_token
-
-**Type:** Histogram (Float, milliseconds)  
-**Description:** Time elapsed between consecutive tokens during streaming.  
-**Use Case:** Monitor token generation consistency. Can help identify stuttering or delays in streaming.  
-**Attributes:** `gen_ai.client.operation` (set to "chat")
-
-### 4. gen_ai.client.operation
-
-**Type:** String attribute (not a histogram)  
-**Description:** The type of operation being performed. Currently set to "chat" for LLM interactions.  
-**Use Case:** Used as a dimension/label for filtering and grouping other histogram metrics.
-
-### 5. gen_ai.client.operation.duration
-
-**Type:** Histogram (Float, milliseconds)  
-**Description:** Total duration of the operation from start to finish.  
-**Use Case:** Track end-to-end operation latency for performance monitoring and optimization.  
-**Attributes:** `gen_ai.client.operation` (set to "chat")
-
-### 6. gen_ai.client.token.usage
+#### 1. gen_ai.client.token.usage
 
 **Type:** Histogram (Integer)  
 **Description:** Total number of tokens used in the operation (prompt + completion).  
 **Use Case:** Monitor token consumption for cost tracking and quota management.  
 **Attributes:** `gen_ai.client.operation` (set to "chat")
+**Span Type:** LLM
 
-### 7. gen_ai.usage.prompt_tokens_details.cached_tokens
+#### 2. gen_ai.usage.prompt_tokens_details.cached_tokens
 
 **Type:** Histogram (Integer)  
 **Description:** Number of prompt tokens that were cached and reused from previous requests.  
 **Use Case:** Track cache hit rate and cost savings from prompt caching.  
 **Attributes:** `gen_ai.client.operation` (set to "chat")
+**Span Type:** LLM
+
+### Span Attributes (Timing Information)
+
+These metrics are captured as span attributes for trace correlation but not reported as separate histogram metrics:
+
+#### 3. gen_ai.client.time_to_first_token
+
+**Type:** Float (milliseconds)  
+**Description:** Time elapsed from the start of the request to receiving the first token in the response.  
+**Use Case:** Measure initial latency and response time. Useful for understanding user-perceived latency.
+**Span Type:** Chain (invocation level)
+
+#### 4. gen_ai.client.time_per_output_token
+
+**Type:** Float (milliseconds)  
+**Description:** Average time taken per output token, calculated as total generation time divided by token count.  
+**Use Case:** Measure generation throughput. Helps understand overall generation speed.
+**Span Type:** Chain (invocation level)
+
+#### 5. gen_ai.client.time_between_token
+
+**Type:** Float (milliseconds)  
+**Description:** Time elapsed between consecutive tokens during streaming.  
+**Use Case:** Monitor token generation consistency. Can help identify stuttering or delays in streaming.
+**Span Type:** Chain (invocation level)
+
+#### 6. gen_ai.client.operation.duration
+
+**Type:** Float (milliseconds)  
+**Description:** Total duration of the operation from start to finish.  
+**Use Case:** Track end-to-end operation latency for performance monitoring and optimization.
+**Span Type:** Chain (invocation level)
+
+#### 7. gen_ai.client.operation
+
+**Type:** String attribute  
+**Description:** The type of operation being performed. Currently set to "chat" for LLM interactions.  
+**Use Case:** Used as a dimension/label for filtering and grouping histogram metrics.
+**Span Type:** LLM
 
 ## Implementation Details
 
@@ -100,7 +111,7 @@ for modality_token_count in obj.prompt_tokens_details:
 
 ## Usage
 
-These metrics are automatically collected when using the Google ADK instrumentor:
+Histogram metrics are automatically collected when using the Google ADK instrumentor with a meter provider:
 
 ```python
 from openinference.instrumentation.google_adk import GoogleADKInstrumentor
@@ -109,41 +120,63 @@ from opentelemetry import metrics
 # Set up meter provider (use your observability backend's meter provider)
 meter_provider = metrics.get_meter_provider()
 
-# Instrument with meter provider to enable metrics
+# Instrument with meter provider to enable histogram metrics
 GoogleADKInstrumentor().instrument(meter_provider=meter_provider)
 
 # Your Google ADK code here
-# The metrics will be automatically recorded as histograms
+# Token usage metrics will be automatically recorded as histograms for LLM calls
+# Timing metrics will be available as span attributes for trace correlation
 ```
 
-## Metric Format
+## Metrics and Span Types
 
-All numeric metrics are recorded as OpenTelemetry histograms with the following characteristics:
+### LLM Span Metrics (Histograms)
 
-- **Histogram Type**: Values are recorded with histogram instruments for aggregation
-- **Attributes**: Each histogram includes `gen_ai.client.operation` attribute for filtering
-- **Units**: Timing metrics are in milliseconds (ms), token metrics are in token counts
-- **Span Attributes**: Values are also set as span attributes for correlation with traces
+These histograms are recorded only when actual LLM calls are made:
 
-## Example Usage
+- **gen_ai.client.token.usage**: Total token count
+- **gen_ai.usage.prompt_tokens_details.cached_tokens**: Cached token count
 
-After instrumentation, metrics are automatically recorded during LLM operations:
+Both include the `gen_ai.client.operation: "chat"` attribute.
 
+### Chain Span Attributes (Timing)
+
+These are captured as span attributes at the invocation/chain level for trace correlation:
+
+- **gen_ai.client.time_to_first_token**: Latency to first token (ms)
+- **gen_ai.client.time_per_output_token**: Average time per token (ms)
+- **gen_ai.client.time_between_token**: Inter-token timing (ms)
+- **gen_ai.client.operation.duration**: Total operation duration (ms)
+
+## Example
+
+After instrumentation, metrics are recorded as follows:
+
+**LLM Span** (histogram metrics):
 ```python
-# Metrics are recorded as histograms:
-# - gen_ai.client.time_to_first_token: 234.5 ms (with operation="chat")
-# - gen_ai.client.time_per_output_token: 12.3 ms (with operation="chat")
-# - gen_ai.client.time_between_token: 15.7 ms (with operation="chat")
-# - gen_ai.client.operation.duration: 1523.8 ms (with operation="chat")
+# Recorded as histograms during LLM calls:
 # - gen_ai.client.token.usage: 350 tokens (with operation="chat")
 # - gen_ai.usage.prompt_tokens_details.cached_tokens: 150 tokens (with operation="chat")
 ```
 
-These histograms can be:
+**Chain Span** (span attributes only):
+```python
+# Available as span attributes for trace correlation:
+# - gen_ai.client.time_to_first_token: 234.5 ms
+# - gen_ai.client.time_per_output_token: 12.3 ms
+# - gen_ai.client.time_between_token: 15.7 ms
+# - gen_ai.client.operation.duration: 1523.8 ms
+```
+
+The histogram metrics can be:
 - Exported to observability platforms (Prometheus, Datadog, etc.)
 - Analyzed with percentile aggregation (P50, P95, P99)
 - Used for alerting and performance monitoring
-- Correlated with trace data via span attributes
+
+The span attributes can be:
+- Correlated with trace data
+- Used for detailed performance analysis
+- Filtered and grouped in trace visualization tools
 
 ## Example Span Attributes
 
