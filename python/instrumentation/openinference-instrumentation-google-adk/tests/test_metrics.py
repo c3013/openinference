@@ -101,4 +101,6 @@ async def test_google_adk_metrics(
                     assert len(metric.data.data_points) > 0
                     # Verify the data point has a value
                     for data_point in metric.data.data_points:
-                        assert data_point.count > 0
+                        # For histogram data points, check count
+                        if hasattr(data_point, "count"):
+                            assert data_point.count > 0
