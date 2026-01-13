@@ -395,13 +395,12 @@ class _TraceCallLlm(_WithTracer):
                     time_per_token = operation_duration / completion_tokens
                     self._time_per_output_token_histogram.record(time_per_token, metric_attributes)
 
-                    # For time_to_first_token, we estimate it as time_per_token
-                    # In streaming scenarios, this would be tracked differently
-                    # For non-streaming, we approximate as the time per token
+                    # NOTE: For non-streaming LLM calls, we cannot measure individual token timing.
+                    # The following metrics (time_to_first_token and time_between_token) are
+                    # approximations based on average time per token. In streaming scenarios,
+                    # these would be tracked with actual per-token timing measurements.
+                    # These approximations provide baseline metrics for non-streaming calls.
                     self._time_to_first_token_histogram.record(time_per_token, metric_attributes)
-
-                    # For time_between_token, we use the same average
-                    # In streaming, this would be tracked per token
                     self._time_between_token_histogram.record(time_per_token, metric_attributes)
 
         # Record operation type (always 1 for chat completion)
