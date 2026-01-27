@@ -60,8 +60,8 @@ class GoogleADKInstrumentor(BaseInstrumentor):  # type: ignore
         # Store original methods for cleanup during uninstrumentation
         self._originals: List[Tuple[Any, Any, Any]] = []
         method_wrappers: Dict[Any, Any] = {
-            Runner.run_async: _RunnerRunAsync(self._tracer),
-            BaseAgent.run_async: _BaseAgentRunAsync(self._tracer),
+            Runner.run_async: _RunnerRunAsync(self._tracer, self._meter),
+            BaseAgent.run_async: _BaseAgentRunAsync(self._tracer, self._meter),
         }
 
         # Wrap each method with its corresponding tracer
@@ -123,7 +123,7 @@ class GoogleADKInstrumentor(BaseInstrumentor):  # type: ignore
         setattr(
             functions,
             "trace_tool_call",
-            _TraceToolCall(self._tracer)(functions.trace_tool_call),  # type: ignore[attr-defined]
+            _TraceToolCall(self._tracer, self._meter)(functions.trace_tool_call),  # type: ignore[attr-defined]
         )
 
     def _unpatch_trace_tool_call(self) -> None:

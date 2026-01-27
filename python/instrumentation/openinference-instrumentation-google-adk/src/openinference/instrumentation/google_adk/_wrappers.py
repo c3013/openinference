@@ -12,6 +12,7 @@ from typing import (
     Iterable,
     Iterator,
     Mapping,
+    Optional,
     OrderedDict,
     TypedDict,
     TypeVar,
@@ -62,11 +63,13 @@ class _WithTracer(ABC):
     def __init__(
         self,
         tracer: trace_api.Tracer,
+        meter: Optional[Meter] = None,
         *args: Any,
         **kwargs: Any,
     ) -> None:
         super().__init__(*args, **kwargs)
         self._tracer = tracer
+        self._meter = meter
 
 
 class _RunnerRunAsyncKwargs(TypedDict):
@@ -77,6 +80,22 @@ class _RunnerRunAsyncKwargs(TypedDict):
 
 
 class _RunnerRunAsync(_WithTracer):
+    def __init__(
+        self,
+        tracer: trace_api.Tracer,
+        meter: Optional[Meter] = None,
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(tracer, meter, *args, **kwargs)
+        self._workflow_duration_histogram = None
+        if self._meter:
+            self._workflow_duration_histogram = self._meter.create_histogram(
+                name="gen_ai.workflow.duration",
+                description="Duration of workflow operations",
+                unit="s",
+            )
+
     def __call__(
         self,
         wrapped: Callable[..., AsyncGenerator[Event, None]],
@@ -89,9 +108,15 @@ class _RunnerRunAsync(_WithTracer):
             return generator
 
         tracer = self._tracer
-        name = f"invocation [{instance.app_name}]"
+        meter = self._meter
+        workflow_duration_histogram = self._workflow_duration_histogram if self._meter else None
+        workflow_name = instance.app_name
+        name = f"invocation [{workflow_name}]"
         attributes = dict(get_attributes_from_context())
         attributes[SpanAttributes.OPENINFERENCE_SPAN_KIND] = OpenInferenceSpanKindValues.CHAIN.value
+
+        # Add gen_ai.workflow.name attribute
+        attributes["gen_ai.workflow.name"] = workflow_name
 
         arguments = bind_args_kwargs(wrapped, *args, **kwargs)
         try:
@@ -104,6 +129,16 @@ class _RunnerRunAsync(_WithTracer):
         except Exception:
             logger.exception(f"Failed to get attribute: {SpanAttributes.INPUT_VALUE}.")
 
+        # Add gen_ai.input.messages from new_message
+        if new_message := kwargs.get("new_message"):
+            try:
+                if hasattr(new_message, "parts") and new_message.parts:
+                    for i, part in enumerate(new_message.parts):
+                        if hasattr(part, "text") and part.text:
+                            attributes[f"gen_ai.input.messages.0.content.{i}.text"] = part.text
+            except Exception:
+                logger.exception("Failed to get gen_ai.input.messages attribute.")
+
         if (user_id := kwargs.get("user_id")) is not None:
             attributes[SpanAttributes.USER_ID] = user_id
         if (session_id := kwargs.get("session_id")) is not None:
@@ -113,6 +148,8 @@ class _RunnerRunAsync(_WithTracer):
             __wrapped__: AsyncGenerator[Event, None]
 
             async def __aiter__(self) -> Any:
+                start_time = time.time()
+                error_type = None
                 with ExitStack() as stack:
                     span = stack.enter_context(
                         tracer.start_as_current_span(
@@ -124,28 +161,74 @@ class _RunnerRunAsync(_WithTracer):
                         stack.enter_context(using_user(user_id))
                     if session_id is not None:
                         stack.enter_context(using_session(session_id))
-                    async for event in self.__wrapped__:
-                        if event.is_final_response():
-                            try:
-                                span.set_attribute(
-                                    SpanAttributes.OUTPUT_VALUE,
-                                    event.model_dump_json(exclude_none=True),
-                                )
-                                span.set_attribute(
-                                    SpanAttributes.OUTPUT_MIME_TYPE,
-                                    OpenInferenceMimeTypeValues.JSON.value,
-                                )
-                            except Exception:
-                                logger.exception(
-                                    f"Failed to get attribute: {SpanAttributes.OUTPUT_VALUE}."
-                                )
-                        yield event
-                    span.set_status(StatusCode.OK)
+                    try:
+                        async for event in self.__wrapped__:
+                            if event.is_final_response():
+                                try:
+                                    output_value = event.model_dump_json(exclude_none=True)
+                                    span.set_attribute(
+                                        SpanAttributes.OUTPUT_VALUE,
+                                        output_value,
+                                    )
+                                    span.set_attribute(
+                                        SpanAttributes.OUTPUT_MIME_TYPE,
+                                        OpenInferenceMimeTypeValues.JSON.value,
+                                    )
+                                    # Add gen_ai.output.messages
+                                    if hasattr(event, "content") and event.content:
+                                        try:
+                                            if (
+                                                hasattr(event.content, "parts")
+                                                and event.content.parts
+                                            ):
+                                                for i, part in enumerate(event.content.parts):
+                                                    if hasattr(part, "text") and part.text:
+                                                        span.set_attribute(
+                                                            f"gen_ai.output.messages.0.content.{i}.text",
+                                                            part.text,
+                                                        )
+                                        except Exception:
+                                            logger.exception(
+                                                "Failed to get gen_ai.output.messages attribute."
+                                            )
+                                except Exception:
+                                    logger.exception(
+                                        f"Failed to get attribute: {SpanAttributes.OUTPUT_VALUE}."
+                                    )
+                            yield event
+                        span.set_status(StatusCode.OK)
+                    except Exception as e:
+                        error_type = type(e).__name__
+                        raise
+                    finally:
+                        # Record workflow duration metric
+                        if workflow_duration_histogram:
+                            duration = time.time() - start_time
+                            metric_attributes = {"gen_ai.workflow.name": workflow_name}
+                            if error_type:
+                                metric_attributes["error.type"] = error_type
+                            workflow_duration_histogram.record(duration, metric_attributes)
 
         return _AsyncGenerator(generator)
 
 
 class _BaseAgentRunAsync(_WithTracer):
+    def __init__(
+        self,
+        tracer: trace_api.Tracer,
+        meter: Optional[Meter] = None,
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(tracer, meter, *args, **kwargs)
+        self._agent_duration_histogram = None
+        if self._meter:
+            self._agent_duration_histogram = self._meter.create_histogram(
+                name="gen_ai.agent.duration",
+                description="Duration of agent operations",
+                unit="s",
+            )
+
     def __call__(
         self,
         wrapped: Callable[..., AsyncGenerator[Event, None]],
@@ -158,36 +241,79 @@ class _BaseAgentRunAsync(_WithTracer):
             return generator
 
         tracer = self._tracer
-        name = f"agent_run [{instance.name}]"
+        meter = self._meter
+        agent_duration_histogram = self._agent_duration_histogram if self._meter else None
+        agent_name = instance.name
+        name = f"agent_run [{agent_name}]"
         attributes = dict(get_attributes_from_context())
         attributes[SpanAttributes.OPENINFERENCE_SPAN_KIND] = OpenInferenceSpanKindValues.AGENT.value
-        attributes[SpanAttributes.AGENT_NAME] = instance.name
+        attributes[SpanAttributes.AGENT_NAME] = agent_name
+
+        # Add gen_ai span attributes
+        attributes["gen_ai.operation.name"] = "agent_run"
+        # Use agent name as agent ID if available
+        if hasattr(instance, "id"):
+            attributes["gen_ai.agent.id"] = str(instance.id)
+        else:
+            attributes["gen_ai.agent.id"] = agent_name
 
         class _AsyncGenerator(wrapt.ObjectProxy):  # type: ignore[misc]
             __wrapped__: AsyncGenerator[Event, None]
 
             async def __aiter__(self) -> Any:
+                start_time = time.time()
+                error_type = None
                 with tracer.start_as_current_span(
                     name=name,
                     attributes=attributes,
                 ) as span:
-                    async for event in self.__wrapped__:
-                        if event.is_final_response():
-                            try:
-                                span.set_attribute(
-                                    SpanAttributes.OUTPUT_VALUE,
-                                    event.model_dump_json(exclude_none=True),
-                                )
-                                span.set_attribute(
-                                    SpanAttributes.OUTPUT_MIME_TYPE,
-                                    OpenInferenceMimeTypeValues.JSON.value,
-                                )
-                            except Exception:
-                                logger.exception(
-                                    f"Failed to get attribute: {SpanAttributes.OUTPUT_VALUE}."
-                                )
-                        yield event
-                    span.set_status(StatusCode.OK)
+                    try:
+                        async for event in self.__wrapped__:
+                            if event.is_final_response():
+                                try:
+                                    output_value = event.model_dump_json(exclude_none=True)
+                                    span.set_attribute(
+                                        SpanAttributes.OUTPUT_VALUE,
+                                        output_value,
+                                    )
+                                    span.set_attribute(
+                                        SpanAttributes.OUTPUT_MIME_TYPE,
+                                        OpenInferenceMimeTypeValues.JSON.value,
+                                    )
+                                    # Add gen_ai.output.messages
+                                    if hasattr(event, "content") and event.content:
+                                        try:
+                                            if (
+                                                hasattr(event.content, "parts")
+                                                and event.content.parts
+                                            ):
+                                                for i, part in enumerate(event.content.parts):
+                                                    if hasattr(part, "text") and part.text:
+                                                        span.set_attribute(
+                                                            f"gen_ai.output.messages.0.content.{i}.text",
+                                                            part.text,
+                                                        )
+                                        except Exception:
+                                            logger.exception(
+                                                "Failed to get gen_ai.output.messages attribute."
+                                            )
+                                except Exception:
+                                    logger.exception(
+                                        f"Failed to get attribute: {SpanAttributes.OUTPUT_VALUE}."
+                                    )
+                            yield event
+                        span.set_status(StatusCode.OK)
+                    except Exception as e:
+                        error_type = type(e).__name__
+                        raise
+                    finally:
+                        # Record agent duration metric
+                        if agent_duration_histogram:
+                            duration = time.time() - start_time
+                            metric_attributes = {"gen_ai.operation.name": "agent_run"}
+                            if error_type:
+                                metric_attributes["error.type"] = error_type
+                            agent_duration_histogram.record(duration, metric_attributes)
 
         return _AsyncGenerator(generator)
 
@@ -410,6 +536,22 @@ class _TraceCallLlm(_WithTracer):
 
 
 class _TraceToolCall(_WithTracer):
+    def __init__(
+        self,
+        tracer: trace_api.Tracer,
+        meter: Optional[Meter] = None,
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(tracer, meter, *args, **kwargs)
+        self._tool_duration_histogram = None
+        if self._meter:
+            self._tool_duration_histogram = self._meter.create_histogram(
+                name="gen_ai.tool.duration",
+                description="Duration of tool operations",
+                unit="s",
+            )
+
     @wrapt.decorator  # type: ignore[misc]
     def __call__(
         self,
@@ -418,53 +560,101 @@ class _TraceToolCall(_WithTracer):
         args: tuple[Any, ...],
         kwargs: Mapping[str, Any],
     ) -> T:
-        ans = wrapped(*args, **kwargs)
-        if context_api.get_value(_SUPPRESS_INSTRUMENTATION_KEY):
-            return ans
-        span = get_current_span()
-        span.set_status(StatusCode.OK)  # Pre-emptively set status to OK
-        span.set_attribute(
-            SpanAttributes.OPENINFERENCE_SPAN_KIND,
-            OpenInferenceSpanKindValues.TOOL.value,
-        )
-        arguments = bind_args_kwargs(wrapped, *args, **kwargs)
-        if base_tool := next(
-            (arg for arg in arguments.values() if isinstance(arg, BaseTool)), None
-        ):
-            span.set_attribute(SpanAttributes.TOOL_NAME, base_tool.name)
-            span.set_attribute(SpanAttributes.TOOL_DESCRIPTION, base_tool.description)
-            if args_dict := next(
-                (arg for arg in arguments.values() if isinstance(arg, Mapping)), None
+        start_time = time.time()
+        error_type = None
+        tool_name = None
+
+        try:
+            ans = wrapped(*args, **kwargs)
+            if context_api.get_value(_SUPPRESS_INSTRUMENTATION_KEY):
+                return ans
+            span = get_current_span()
+            span.set_status(StatusCode.OK)  # Pre-emptively set status to OK
+            span.set_attribute(
+                SpanAttributes.OPENINFERENCE_SPAN_KIND,
+                OpenInferenceSpanKindValues.TOOL.value,
+            )
+
+            # Add gen_ai span attributes
+            span.set_attribute("gen_ai.operation.name", "tool_call")
+
+            arguments = bind_args_kwargs(wrapped, *args, **kwargs)
+            if base_tool := next(
+                (arg for arg in arguments.values() if isinstance(arg, BaseTool)), None
             ):
-                try:
-                    span.set_attribute(
-                        SpanAttributes.TOOL_PARAMETERS,
-                        safe_json_dumps(args_dict),
-                    )
-                    span.set_attribute(
-                        SpanAttributes.INPUT_VALUE,
-                        safe_json_dumps(args_dict),
-                    )
-                    span.set_attribute(
-                        SpanAttributes.INPUT_MIME_TYPE,
-                        OpenInferenceMimeTypeValues.JSON.value,
-                    )
-                except Exception:
-                    logger.exception(f"Failed to get attribute: {SpanAttributes.INPUT_VALUE}.")
-        if event := next((arg for arg in arguments.values() if isinstance(arg, Event)), None):
-            if responses := event.get_function_responses():
-                try:
-                    span.set_attribute(
-                        SpanAttributes.OUTPUT_VALUE,
-                        responses[0].model_dump_json(exclude_none=True),
-                    )
-                    span.set_attribute(
-                        SpanAttributes.OUTPUT_MIME_TYPE,
-                        OpenInferenceMimeTypeValues.JSON.value,
-                    )
-                except Exception:
-                    logger.exception(f"Failed to get attribute in {wrapped.__name__}.")
-        return ans
+                tool_name = base_tool.name
+                span.set_attribute(SpanAttributes.TOOL_NAME, tool_name)
+                span.set_attribute(SpanAttributes.TOOL_DESCRIPTION, base_tool.description)
+
+                # Add gen_ai.tool.name and gen_ai.tool.type
+                span.set_attribute("gen_ai.tool.name", tool_name)
+                span.set_attribute("gen_ai.tool.type", "function")
+
+                if args_dict := next(
+                    (arg for arg in arguments.values() if isinstance(arg, Mapping)), None
+                ):
+                    try:
+                        tool_args_json = safe_json_dumps(args_dict)
+                        span.set_attribute(
+                            SpanAttributes.TOOL_PARAMETERS,
+                            tool_args_json,
+                        )
+                        span.set_attribute(
+                            SpanAttributes.INPUT_VALUE,
+                            tool_args_json,
+                        )
+                        span.set_attribute(
+                            SpanAttributes.INPUT_MIME_TYPE,
+                            OpenInferenceMimeTypeValues.JSON.value,
+                        )
+                        # Add gen_ai.tool.call.arguments
+                        span.set_attribute("gen_ai.tool.call.arguments", tool_args_json)
+                    except Exception:
+                        logger.exception(f"Failed to get attribute: {SpanAttributes.INPUT_VALUE}.")
+
+            if event := next((arg for arg in arguments.values() if isinstance(arg, Event)), None):
+                # Try to get tool call ID
+                if hasattr(event, "content") and event.content:
+                    try:
+                        if hasattr(event.content, "parts") and event.content.parts:
+                            for part in event.content.parts:
+                                if hasattr(part, "function_call") and part.function_call:
+                                    if hasattr(part.function_call, "id") and part.function_call.id:
+                                        span.set_attribute(
+                                            "gen_ai.tool.call.id", part.function_call.id
+                                        )
+                                        break
+                    except Exception:
+                        logger.exception("Failed to get gen_ai.tool.call.id attribute.")
+
+                if responses := event.get_function_responses():
+                    try:
+                        result_json = responses[0].model_dump_json(exclude_none=True)
+                        span.set_attribute(
+                            SpanAttributes.OUTPUT_VALUE,
+                            result_json,
+                        )
+                        span.set_attribute(
+                            SpanAttributes.OUTPUT_MIME_TYPE,
+                            OpenInferenceMimeTypeValues.JSON.value,
+                        )
+                        # Add gen_ai.tool.call.result
+                        span.set_attribute("gen_ai.tool.call.result", result_json)
+                    except Exception:
+                        logger.exception(f"Failed to get attribute in {wrapped.__name__}.")
+
+            return ans
+        except Exception as e:
+            error_type = type(e).__name__
+            raise
+        finally:
+            # Record tool duration metric
+            if self._tool_duration_histogram and tool_name:
+                duration = time.time() - start_time
+                metric_attributes = {"gen_ai.tool.name": tool_name}
+                if error_type:
+                    metric_attributes["error.type"] = error_type
+                self._tool_duration_histogram.record(duration, metric_attributes)
 
 
 def stop_on_exception(
