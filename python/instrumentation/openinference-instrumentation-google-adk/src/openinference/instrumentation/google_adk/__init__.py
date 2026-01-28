@@ -2,10 +2,12 @@ import logging
 from typing import Any, Collection, Dict, Iterator, List, Tuple, cast
 
 import wrapt
+from opentelemetry import metrics as metrics_api
 from opentelemetry import trace as trace_api
 from opentelemetry.instrumentation.instrumentor import (  # type: ignore[attr-defined]
     BaseInstrumentor,
 )
+from opentelemetry.metrics import Meter
 from opentelemetry.trace import Span, Tracer, get_current_span
 from opentelemetry.util._decorator import _agnosticcontextmanager
 from wrapt import resolve_path, wrap_function_wrapper
@@ -39,6 +41,14 @@ class GoogleADKInstrumentor(BaseInstrumentor):  # type: ignore
             ),
         )
 
+        # Initialize meter for metrics
+        if not (meter_provider := kwargs.get("meter_provider")):
+            meter_provider = metrics_api.get_meter_provider()
+        self._meter = cast(
+            Meter,
+            meter_provider.get_meter(__name__, __version__),
+        )
+
         from google.adk.agents import BaseAgent
         from google.adk.runners import Runner
 
@@ -50,8 +60,8 @@ class GoogleADKInstrumentor(BaseInstrumentor):  # type: ignore
         # Store original methods for cleanup during uninstrumentation
         self._originals: List[Tuple[Any, Any, Any]] = []
         method_wrappers: Dict[Any, Any] = {
-            Runner.run_async: _RunnerRunAsync(self._tracer),
-            BaseAgent.run_async: _BaseAgentRunAsync(self._tracer),
+            Runner.run_async: _RunnerRunAsync(self._tracer, self._meter),
+            BaseAgent.run_async: _BaseAgentRunAsync(self._tracer, self._meter),
         }
 
         # Wrap each method with its corresponding tracer
@@ -83,7 +93,7 @@ class GoogleADKInstrumentor(BaseInstrumentor):  # type: ignore
         setattr(
             base_llm_flow,
             "trace_call_llm",
-            _TraceCallLlm(self._tracer)(base_llm_flow.trace_call_llm),  # type: ignore[attr-defined]
+            _TraceCallLlm(self._tracer, self._meter)(base_llm_flow.trace_call_llm),  # type: ignore[attr-defined]
         )
 
     def _unpatch_trace_call_llm(self) -> None:
@@ -113,7 +123,7 @@ class GoogleADKInstrumentor(BaseInstrumentor):  # type: ignore
         setattr(
             functions,
             "trace_tool_call",
-            _TraceToolCall(self._tracer)(functions.trace_tool_call),  # type: ignore[attr-defined]
+            _TraceToolCall(self._tracer, self._meter)(functions.trace_tool_call),  # type: ignore[attr-defined]
         )
 
     def _unpatch_trace_tool_call(self) -> None:

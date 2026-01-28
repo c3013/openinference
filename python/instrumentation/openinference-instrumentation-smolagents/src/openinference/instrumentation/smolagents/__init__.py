@@ -1,7 +1,9 @@
-from typing import Any, Callable, Collection, Optional
+from typing import Any, Callable, Collection, Optional, cast
 
+from opentelemetry import metrics as metrics_api
 from opentelemetry import trace as trace_api
 from opentelemetry.instrumentation.instrumentor import BaseInstrumentor  # type: ignore
+from opentelemetry.metrics import Meter
 from wrapt import wrap_function_wrapper
 
 from openinference.instrumentation import (
@@ -26,6 +28,7 @@ class SmolagentsInstrumentor(BaseInstrumentor):  # type: ignore
         "_original_tool_call_method",
         "_original_model_generate_methods",
         "_tracer",
+        "_meter",
     )
 
     def instrumentation_dependencies(self) -> Collection[str]:
@@ -46,7 +49,15 @@ class SmolagentsInstrumentor(BaseInstrumentor):  # type: ignore
             config=config,
         )
 
-        run_wrapper = _RunWrapper(tracer=self._tracer)
+        # Initialize meter for metrics
+        if not (meter_provider := kwargs.get("meter_provider")):
+            meter_provider = metrics_api.get_meter_provider()
+        self._meter = cast(
+            Meter,
+            meter_provider.get_meter(__name__, __version__),
+        )
+
+        run_wrapper = _RunWrapper(tracer=self._tracer, meter=self._meter)
         self._original_run_method = getattr(MultiStepAgent, "run", None)
         wrap_function_wrapper(
             module="smolagents",
@@ -84,7 +95,7 @@ class SmolagentsInstrumentor(BaseInstrumentor):  # type: ignore
                 wrapper=model_subclass_wrapper,
             )
 
-        tool_call_wrapper = _ToolCallWrapper(tracer=self._tracer)
+        tool_call_wrapper = _ToolCallWrapper(tracer=self._tracer, meter=self._meter)
         self._original_tool_call_method = getattr(Tool, "__call__", None)
         wrap_function_wrapper(
             module="smolagents",

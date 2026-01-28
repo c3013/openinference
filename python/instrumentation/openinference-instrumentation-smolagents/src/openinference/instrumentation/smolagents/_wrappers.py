@@ -1,3 +1,4 @@
+import time
 from collections.abc import Generator
 from enum import Enum
 from inspect import signature
@@ -5,6 +6,7 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, Iterator, Mapping, Option
 
 from opentelemetry import context as context_api
 from opentelemetry import trace as trace_api
+from opentelemetry.metrics import Meter
 from opentelemetry.sdk.trace import ReadableSpan
 from opentelemetry.util.types import AttributeValue
 
@@ -96,8 +98,22 @@ def _smolagent_run_attributes(
 
 
 class _RunWrapper:
-    def __init__(self, tracer: trace_api.Tracer) -> None:
+    def __init__(self, tracer: trace_api.Tracer, meter: Optional[Meter] = None) -> None:
         self._tracer = tracer
+        self._meter = meter
+        self._agent_duration_histogram = None
+        self._workflow_duration_histogram = None
+        if self._meter:
+            self._agent_duration_histogram = self._meter.create_histogram(
+                name="gen_ai.agent.duration",
+                description="Duration of agent operations",
+                unit="s",
+            )
+            self._workflow_duration_histogram = self._meter.create_histogram(
+                name="gen_ai.workflow.duration",
+                description="Duration of workflow operations",
+                unit="s",
+            )
 
     def __call__(
         self,
@@ -111,8 +127,16 @@ class _RunWrapper:
             return wrapped(*args, **kwargs)
 
         agent = instance
-        span_name = f"{getattr(agent, 'name', None) or agent.__class__.__name__}.run"
+        agent_name = getattr(agent, "name", None) or agent.__class__.__name__
+        span_name = f"{agent_name}.run"
         arguments = _bind_arguments(wrapped, *args, **kwargs)
+
+        # Capture histogram references
+        agent_duration_histogram = self._agent_duration_histogram
+        workflow_duration_histogram = self._workflow_duration_histogram
+
+        # Get task from arguments for input messages
+        task = arguments.get("task", agent.task if hasattr(agent, "task") else None)
 
         # Start parent span for the full run
         span = self._tracer.start_span(
@@ -128,19 +152,32 @@ class _RunWrapper:
                         ),
                         **dict(_smolagent_run_attributes(agent, arguments)),
                         **dict(get_attributes_from_context()),
+                        # Add gen_ai span attributes
+                        "gen_ai.operation.name": "agent_run",
+                        "gen_ai.agent.id": agent_name,
+                        "gen_ai.workflow.name": agent_name,  # Use agent name as workflow name
                     }
                 )
             ),
         )
+
+        # Add input messages attribute
+        if task:
+            span.set_attribute("gen_ai.input.messages.0.content", str(task))
 
         # Set the tracing context for downstream spans
         context = trace_api.set_span_in_context(span)
         token = context_api.attach(context)
         agent_output = []
 
+        # Track start time for metrics
+        start_time = time.time()
+        error_type = None
+
         try:
             agent_output = wrapped(*args, **kwargs)
         except Exception as e:
+            error_type = type(e).__name__
             span.record_exception(e)
             span.set_status(trace_api.StatusCode.ERROR)
             raise
@@ -152,12 +189,14 @@ class _RunWrapper:
             output_chunks: list[str] = []
 
             def wrapped_generator() -> Generator[str, None, None]:
+                nonlocal error_type
                 try:
                     # Collect chunks for final output
                     for chunk in agent_output:
                         output_chunks.append(str(chunk))
                         yield chunk
                 except Exception as e:
+                    error_type = type(e).__name__
                     span.record_exception(e)
                     span.set_status(trace_api.StatusCode.ERROR)
                     raise
@@ -166,16 +205,24 @@ class _RunWrapper:
                     steps = getattr(agent.monitor, "steps", [])
                     history = getattr(agent.monitor, "history", [])
 
+                    output_value = None
                     if steps:
                         observation = getattr(steps[-1], "observations", None)
                         if observation:
+                            output_value = observation
                             span.set_attribute(OUTPUT_VALUE, observation)
                     elif history:
                         observation = getattr(history[-1], "observations", None)
                         if observation:
+                            output_value = observation
                             span.set_attribute(OUTPUT_VALUE, observation)
                     elif output_chunks:
-                        span.set_attribute(OUTPUT_VALUE, "".join(output_chunks))
+                        output_value = "".join(output_chunks)
+                        span.set_attribute(OUTPUT_VALUE, output_value)
+
+                    # Add output messages attribute
+                    if output_value:
+                        span.set_attribute("gen_ai.output.messages.0.content", str(output_value))
 
                     # Record token usage metadata
                     span.set_attribute(
@@ -194,13 +241,32 @@ class _RunWrapper:
                     span.end()
                     context_api.detach(token)
 
+                    # Record metrics
+                    duration = time.time() - start_time
+                    if agent_duration_histogram:
+                        agent_metric_attributes = {"gen_ai.operation.name": "agent_run"}
+                        if error_type:
+                            agent_metric_attributes["error.type"] = error_type
+                        agent_duration_histogram.record(duration, agent_metric_attributes)
+
+                    if workflow_duration_histogram:
+                        workflow_metric_attributes = {"gen_ai.workflow.name": agent_name}
+                        if error_type:
+                            workflow_metric_attributes["error.type"] = error_type
+                        workflow_duration_histogram.record(duration, workflow_metric_attributes)
+
             return wrapped_generator()
 
         # Handle non-streaming (normal) run
         else:
             try:
                 # Set output value from the agent output
-                span.set_attribute(OUTPUT_VALUE, str(agent_output))
+                output_value = str(agent_output)
+                span.set_attribute(OUTPUT_VALUE, output_value)
+
+                # Add output messages attribute
+                span.set_attribute("gen_ai.output.messages.0.content", output_value)
+
                 # Record token usage metadata
                 span.set_attribute(LLM_TOKEN_COUNT_PROMPT, agent.monitor.total_input_token_count)
                 span.set_attribute(
@@ -213,6 +279,7 @@ class _RunWrapper:
                 return agent_output
 
             except Exception as e:
+                error_type = type(e).__name__
                 span.record_exception(e)
                 span.set_status(trace_api.StatusCode.ERROR)
                 raise
@@ -221,6 +288,20 @@ class _RunWrapper:
                 span.set_status(trace_api.StatusCode.OK)
                 span.end()
                 context_api.detach(token)
+
+                # Record metrics
+                duration = time.time() - start_time
+                if agent_duration_histogram:
+                    agent_metric_attributes = {"gen_ai.operation.name": "agent_run"}
+                    if error_type:
+                        agent_metric_attributes["error.type"] = error_type
+                    agent_duration_histogram.record(duration, agent_metric_attributes)
+
+                if workflow_duration_histogram:
+                    workflow_metric_attributes = {"gen_ai.workflow.name": agent_name}
+                    if error_type:
+                        workflow_metric_attributes["error.type"] = error_type
+                    workflow_duration_histogram.record(duration, workflow_metric_attributes)
 
 
 def _finalize_step_span(
@@ -468,8 +549,16 @@ class _ModelWrapper:
 
 
 class _ToolCallWrapper:
-    def __init__(self, tracer: trace_api.Tracer) -> None:
+    def __init__(self, tracer: trace_api.Tracer, meter: Optional[Meter] = None) -> None:
         self._tracer = tracer
+        self._meter = meter
+        self._tool_duration_histogram = None
+        if self._meter:
+            self._tool_duration_histogram = self._meter.create_histogram(
+                name="gen_ai.tool.duration",
+                description="Duration of tool operations",
+                unit="s",
+            )
 
     def __call__(
         self,
@@ -480,31 +569,62 @@ class _ToolCallWrapper:
     ) -> Any:
         if context_api.get_value(context_api._SUPPRESS_INSTRUMENTATION_KEY):
             return wrapped(*args, **kwargs)
+
+        start_time = time.time()
+        error_type = None
+        tool_name = getattr(instance, "name", instance.__class__.__name__)
         span_name = f"{instance.__class__.__name__}"
-        with self._tracer.start_as_current_span(
-            span_name,
-            attributes={
-                OPENINFERENCE_SPAN_KIND: TOOL,
-                INPUT_VALUE: _get_input_value(
-                    wrapped,
-                    *args,
-                    **kwargs,
-                ),
-                **dict(_tools(instance)),
-                **dict(get_attributes_from_context()),
-            },
-        ) as span:
-            response = wrapped(*args, **kwargs)
-            span.set_status(trace_api.StatusCode.OK)
-            span.set_attributes(
-                dict(
+
+        # Get tool input value
+        input_value = _get_input_value(wrapped, *args, **kwargs)
+
+        try:
+            with self._tracer.start_as_current_span(
+                span_name,
+                attributes={
+                    OPENINFERENCE_SPAN_KIND: TOOL,
+                    INPUT_VALUE: input_value,
+                    **dict(_tools(instance)),
+                    **dict(get_attributes_from_context()),
+                    # Add gen_ai span attributes
+                    "gen_ai.operation.name": "tool_call",
+                    "gen_ai.tool.name": tool_name,
+                    "gen_ai.tool.type": "function",
+                    "gen_ai.tool.call.arguments": input_value,
+                },
+            ) as span:
+                # Add tool call ID if available (generate a simple one based on tool name)
+                # In real scenarios, this would come from the tool call context
+                span.set_attribute("gen_ai.tool.call.id", f"{tool_name}_{int(start_time * 1000)}")
+
+                response = wrapped(*args, **kwargs)
+                span.set_status(trace_api.StatusCode.OK)
+
+                # Get output value
+                output_dict = dict(
                     _output_value_and_mime_type_for_tool_span(
                         response=response,
                         output_type=instance.output_type,
                     )
                 )
-            )
-        return response
+                span.set_attributes(output_dict)
+
+                # Add tool call result
+                result_value = output_dict.get(OUTPUT_VALUE, "")
+                span.set_attribute("gen_ai.tool.call.result", str(result_value))
+
+                return response
+        except Exception as e:
+            error_type = type(e).__name__
+            raise
+        finally:
+            # Record tool duration metric
+            if self._tool_duration_histogram:
+                duration = time.time() - start_time
+                metric_attributes = {"gen_ai.tool.name": tool_name}
+                if error_type:
+                    metric_attributes["error.type"] = error_type
+                self._tool_duration_histogram.record(duration, metric_attributes)
 
 
 def _output_value_and_mime_type_for_tool_span(

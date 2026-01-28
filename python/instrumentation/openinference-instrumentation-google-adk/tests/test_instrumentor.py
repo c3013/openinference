@@ -80,6 +80,10 @@ async def test_google_adk_instrumentor(
     assert invocation_attributes.pop("output.value", None)
     assert invocation_attributes.pop("input.mime_type", None) == "application/json"
     assert invocation_attributes.pop("input.value", None)
+    # New gen_ai attributes for workflow
+    invocation_attributes.pop("gen_ai.workflow.name", None)
+    invocation_attributes.pop("gen_ai.input.messages.0.content.0.text", None)
+    invocation_attributes.pop("gen_ai.output.messages.0.content.0.text", None)
     assert not invocation_attributes
 
     agent_run_span = spans_by_name[f"agent_run [{agent_name}]"][0]
@@ -98,6 +102,9 @@ async def test_google_adk_instrumentor(
     agent_run_attributes.pop("gen_ai.agent.name", None)
     agent_run_attributes.pop("gen_ai.conversation.id", None)
     agent_run_attributes.pop("gen_ai.operation.name", None)
+    # New gen_ai attributes for agent
+    agent_run_attributes.pop("gen_ai.agent.id", None)
+    agent_run_attributes.pop("gen_ai.output.messages.0.content.0.text", None)
     assert not agent_run_attributes
 
     call_llm_span0 = spans_by_name["call_llm"][0]
@@ -193,6 +200,9 @@ async def test_google_adk_instrumentor(
     tool_attributes.pop("gen_ai.tool.description", None)
     tool_attributes.pop("gen_ai.tool.name", None)
     tool_attributes.pop("gen_ai.tool.type", None)
+    # New gen_ai attributes for tool
+    tool_attributes.pop("gen_ai.tool.call.arguments", None)
+    tool_attributes.pop("gen_ai.tool.call.result", None)
     assert not tool_attributes
 
     call_llm_span1 = spans_by_name["call_llm"][1]
@@ -342,6 +352,10 @@ async def test_google_adk_instrumentor_multi_tool_call(
     assert invocation_attributes.pop("output.value", None)
     assert invocation_attributes.pop("input.mime_type", None) == "application/json"
     assert invocation_attributes.pop("input.value", None)
+    # New gen_ai attributes for workflow
+    invocation_attributes.pop("gen_ai.workflow.name", None)
+    invocation_attributes.pop("gen_ai.input.messages.0.content.0.text", None)
+    invocation_attributes.pop("gen_ai.output.messages.0.content.0.text", None)
     assert not invocation_attributes
 
     agent_run_span = spans_by_name[f"agent_run [{agent_name}]"][0]
@@ -360,6 +374,9 @@ async def test_google_adk_instrumentor_multi_tool_call(
     agent_run_attributes.pop("gen_ai.agent.name", None)
     agent_run_attributes.pop("gen_ai.conversation.id", None)
     agent_run_attributes.pop("gen_ai.operation.name", None)
+    # New gen_ai attributes for agent
+    agent_run_attributes.pop("gen_ai.agent.id", None)
+    agent_run_attributes.pop("gen_ai.output.messages.0.content.0.text", None)
     assert not agent_run_attributes
 
     call_llm_span0 = spans_by_name["call_llm"][0]
@@ -468,6 +485,9 @@ async def test_google_adk_instrumentor_multi_tool_call(
     tool_attributes.pop("gen_ai.tool.description", None)
     tool_attributes.pop("gen_ai.tool.name", None)
     tool_attributes.pop("gen_ai.tool.type", None)
+    # New gen_ai attributes for tool
+    tool_attributes.pop("gen_ai.tool.call.arguments", None)
+    tool_attributes.pop("gen_ai.tool.call.result", None)
     assert not tool_attributes
 
     tool_span1 = spans_by_name["execute_tool get_weather"][1]
@@ -503,6 +523,9 @@ async def test_google_adk_instrumentor_multi_tool_call(
     tool_attributes1.pop("gen_ai.tool.description", None)
     tool_attributes1.pop("gen_ai.tool.name", None)
     tool_attributes1.pop("gen_ai.tool.type", None)
+    # New gen_ai attributes for tool
+    tool_attributes1.pop("gen_ai.tool.call.arguments", None)
+    tool_attributes1.pop("gen_ai.tool.call.result", None)
     assert not tool_attributes1
 
     call_llm_span1 = spans_by_name["call_llm"][1]
@@ -702,6 +725,10 @@ async def test_google_adk_instrumentor_multi_agent(
     assert invocation_attributes.pop("output.value", None)
     assert invocation_attributes.pop("input.mime_type", None) == "application/json"
     assert invocation_attributes.pop("input.value", None)
+    # New gen_ai attributes for workflow
+    invocation_attributes.pop("gen_ai.workflow.name", None)
+    invocation_attributes.pop("gen_ai.input.messages.0.content.0.text", None)
+    invocation_attributes.pop("gen_ai.output.messages.0.content.0.text", None)
     assert not invocation_attributes
 
     # 2. agent_run [root_agent]
@@ -721,6 +748,9 @@ async def test_google_adk_instrumentor_multi_agent(
     root_agent_run_attributes.pop("gen_ai.agent.name", None)
     root_agent_run_attributes.pop("gen_ai.conversation.id", None)
     root_agent_run_attributes.pop("gen_ai.operation.name", None)
+    # New gen_ai attributes for agent
+    root_agent_run_attributes.pop("gen_ai.agent.id", None)
+    root_agent_run_attributes.pop("gen_ai.output.messages.0.content.0.text", None)
     assert not root_agent_run_attributes
 
     # 3. call_llm (root agent - transfer_to_agent)
@@ -819,6 +849,9 @@ async def test_google_adk_instrumentor_multi_agent(
     transfer_tool_attributes.pop("gen_ai.tool.description", None)
     transfer_tool_attributes.pop("gen_ai.tool.name", None)
     transfer_tool_attributes.pop("gen_ai.tool.type", None)
+    # New gen_ai attributes for tool
+    transfer_tool_attributes.pop("gen_ai.tool.call.arguments", None)
+    transfer_tool_attributes.pop("gen_ai.tool.call.result", None)
     assert not transfer_tool_attributes
 
     # 5. agent_run [weather_agent]
@@ -838,6 +871,9 @@ async def test_google_adk_instrumentor_multi_agent(
     weather_agent_run_attributes.pop("gen_ai.agent.name", None)
     weather_agent_run_attributes.pop("gen_ai.conversation.id", None)
     weather_agent_run_attributes.pop("gen_ai.operation.name", None)
+    # New gen_ai attributes for agent
+    weather_agent_run_attributes.pop("gen_ai.agent.id", None)
+    weather_agent_run_attributes.pop("gen_ai.output.messages.0.content.0.text", None)
     assert not weather_agent_run_attributes
 
     # 6. call_llm (weather agent - get_weather)
@@ -989,6 +1025,9 @@ async def test_google_adk_instrumentor_multi_agent(
     get_weather_tool_attributes.pop("gen_ai.tool.description", None)
     get_weather_tool_attributes.pop("gen_ai.tool.name", None)
     get_weather_tool_attributes.pop("gen_ai.tool.type", None)
+    # New gen_ai attributes for tool
+    get_weather_tool_attributes.pop("gen_ai.tool.call.arguments", None)
+    get_weather_tool_attributes.pop("gen_ai.tool.call.result", None)
     assert not get_weather_tool_attributes
 
     # 8. call_llm (weather agent - final response)

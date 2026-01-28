@@ -5,6 +5,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 from opentelemetry import trace as trace_api
 from opentelemetry.sdk import trace as trace_sdk
+from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
@@ -71,6 +73,11 @@ def in_memory_span_exporter() -> InMemorySpanExporter:
 
 
 @pytest.fixture
+def in_memory_metric_reader() -> InMemoryMetricReader:
+    return InMemoryMetricReader()
+
+
+@pytest.fixture
 def tracer_provider(in_memory_span_exporter: InMemorySpanExporter) -> trace_api.TracerProvider:
     resource = Resource(attributes={})
     tracer_provider = trace_sdk.TracerProvider(resource=resource)
@@ -79,12 +86,25 @@ def tracer_provider(in_memory_span_exporter: InMemorySpanExporter) -> trace_api.
     return tracer_provider
 
 
+@pytest.fixture
+def meter_provider(
+    in_memory_metric_reader: InMemoryMetricReader,
+) -> MeterProvider:
+    meter_provider = MeterProvider(metric_readers=[in_memory_metric_reader])
+    return meter_provider
+
+
 @pytest.fixture(autouse=True)
 def instrument(
     tracer_provider: trace_api.TracerProvider,
+    meter_provider: MeterProvider,
     in_memory_span_exporter: InMemorySpanExporter,
 ) -> Generator[None, None, None]:
-    SmolagentsInstrumentor().instrument(tracer_provider=tracer_provider, skip_dep_check=True)
+    SmolagentsInstrumentor().instrument(
+        tracer_provider=tracer_provider,
+        meter_provider=meter_provider,
+        skip_dep_check=True,
+    )
     yield
     SmolagentsInstrumentor().uninstrument()
     in_memory_span_exporter.clear()
@@ -741,6 +761,13 @@ class TestTools:
                 "description": "The city to get the weather for",
             },
         }
+        # New gen_ai attributes for tool
+        attributes.pop("gen_ai.operation.name", None)
+        attributes.pop("gen_ai.tool.call.id", None)
+        attributes.pop("gen_ai.tool.name", None)
+        attributes.pop("gen_ai.tool.type", None)
+        attributes.pop("gen_ai.tool.call.arguments", None)
+        attributes.pop("gen_ai.tool.call.result", None)
         assert not attributes
 
     def test_tool_invocation_returning_dict_has_expected_attributes(
@@ -788,6 +815,13 @@ class TestTools:
                 "description": "The city to get the weather for",
             },
         }
+        # New gen_ai attributes for tool
+        attributes.pop("gen_ai.operation.name", None)
+        attributes.pop("gen_ai.tool.call.id", None)
+        attributes.pop("gen_ai.tool.name", None)
+        attributes.pop("gen_ai.tool.type", None)
+        attributes.pop("gen_ai.tool.call.arguments", None)
+        attributes.pop("gen_ai.tool.call.result", None)
         assert not attributes
 
     def test_tool_invocation_returning_tuple_has_expected_attributes(
@@ -833,6 +867,13 @@ class TestTools:
                 "description": "the location",
             },
         }
+        # New gen_ai attributes for tool
+        attributes.pop("gen_ai.operation.name", None)
+        attributes.pop("gen_ai.tool.call.id", None)
+        attributes.pop("gen_ai.tool.name", None)
+        attributes.pop("gen_ai.tool.type", None)
+        attributes.pop("gen_ai.tool.call.arguments", None)
+        attributes.pop("gen_ai.tool.call.result", None)
         assert not attributes
 
 
